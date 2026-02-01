@@ -740,6 +740,78 @@ Format as: Executive Summary with 3 key takeaways."""
             print("Tool calling pattern completed.")
             print("="*80)
     
+    def run_planning_pattern(self):
+        """Planning Pattern: Break down complex task → Get approval → Execute subtasks."""
+        
+        with self.agent_client:
+            print("\n" + "="*80)
+            print("PLANNING PATTERN")
+            print("="*80)
+            
+            # Get query
+            query = input("\nEnter query (or Enter for default): ").strip()
+            if not query:
+                query = "What are the new research trends in Natural Language Processing?"
+            print(f"\nQuery: {query}\n")
+            
+            # Step 1: Create plan
+            planner = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Planner",
+                instructions="Break queries into 3-4 numbered subtasks. Format: 1. [task]\n2. [task]..."
+            )
+            
+            thread = self.agent_client.threads.create()
+            self.agent_client.messages.create(thread_id=thread.id, role=MessageRole.USER,
+                                             content=f"Break this into subtasks: {query}")
+            run = self.agent_client.runs.create_and_process(thread_id=thread.id, agent_id=planner.id)
+            
+            plan = ""
+            if run.status == "completed":
+                msgs = self.agent_client.messages.list(thread_id=thread.id, order=ListSortOrder.DESCENDING, limit=1)
+                for msg in msgs:
+                    if msg.role == MessageRole.AGENT and msg.text_messages:
+                        plan = msg.text_messages[0].text.value
+                        break
+            
+            print(f"📋 Plan:\n{plan}\n")
+            
+            # Step 2: Get approval
+            if input("Approve? (y/n): ").lower() != 'y':
+                print("❌ Cancelled")
+                self.agent_client.delete_agent(planner.id)
+                return
+            
+            # Step 3: Execute
+            print("\n✅ Executing...\n")
+            executor = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Executor",
+                instructions="Provide brief, factual answers."
+            )
+            
+            subtasks = [line.strip() for line in plan.split('\n') 
+                       if line.strip() and line.strip()[0].isdigit()]
+            
+            for i, task in enumerate(subtasks, 1):
+                print(f"Task {i}: {task}")
+                t = self.agent_client.threads.create()
+                self.agent_client.messages.create(thread_id=t.id, role=MessageRole.USER, content=task)
+                r = self.agent_client.runs.create_and_process(thread_id=t.id, agent_id=executor.id)
+                
+                if r.status == "completed":
+                    msgs = self.agent_client.messages.list(thread_id=t.id, order=ListSortOrder.DESCENDING, limit=1)
+                    for msg in msgs:
+                        if msg.role == MessageRole.AGENT and msg.text_messages:
+                            print(f"→ {msg.text_messages[0].text.value}\n")
+                            break
+            
+            print("="*80)
+            self.agent_client.delete_agent(planner.id)
+            self.agent_client.delete_agent(executor.id)
+            print("Planning completed.")
+            print("="*80)
+    
     def run_interactive_menu(self):
         """Display menu and run selected pattern"""
         print("\n🤖 Azure AI Agent Design Patterns")
@@ -750,8 +822,9 @@ Format as: Executive Summary with 3 key takeaways."""
         print("4. Parallel Execution")
         print("5. Reflection Pattern")
         print("6. Tool Calling Pattern")
+        print("7. Planning Pattern")
         
-        choice = input("\nWhich pattern do you want to run? (1-6): ").strip()
+        choice = input("\nWhich pattern do you want to run? (1-7): ").strip()
         
         if choice == '1':
             self.run_prompt_chain()
@@ -765,8 +838,10 @@ Format as: Executive Summary with 3 key takeaways."""
             self.run_reflection_pattern()
         elif choice == '6':
             self.run_tool_calling_pattern()
+        elif choice == '7':
+            self.run_planning_pattern()
         else:
-            print("Invalid choice. Please run the script again and select 1-6.")
+            print("Invalid choice. Please run the script again and select 1-7.")
 
 
 # Main entry point
