@@ -77,6 +77,92 @@ class AzureAIAgentPatterns:
         else:
             return {"ticker": ticker.upper(), "error": "Price not found"}
     
+    @staticmethod
+    def git_scan_status(directory: str) -> dict:
+        """Scan git repository for uncommitted changes and remote info."""
+        import subprocess
+        import os
+        
+        try:
+            # Change to the directory
+            original_dir = os.getcwd()
+            os.chdir(directory)
+            
+            # Check if it's a git repo
+            subprocess.run(["git", "status"], capture_output=True, check=True)
+            
+            # Get status
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain"], 
+                capture_output=True, text=True, check=True
+            )
+            
+            # Get remote URL
+            remote_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=True
+            )
+            
+            # Get current branch
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, check=True
+            )
+            
+            os.chdir(original_dir)
+            
+            has_changes = bool(status_result.stdout.strip())
+            changes_list = status_result.stdout.strip().split('\n') if has_changes else []
+            
+            return {
+                "has_changes": has_changes,
+                "changes": changes_list,
+                "remote_url": remote_result.stdout.strip(),
+                "branch": branch_result.stdout.strip(),
+                "directory": directory
+            }
+        except subprocess.CalledProcessError as e:
+            return {"error": f"Git command failed: {str(e)}"}
+        except Exception as e:
+            return {"error": f"Error: {str(e)}"}
+    
+    @staticmethod
+    def git_commit_and_push(directory: str, commit_message: str) -> dict:
+        """Stage all changes, commit with message, and push to remote."""
+        import subprocess
+        import os
+        
+        try:
+            original_dir = os.getcwd()
+            os.chdir(directory)
+            
+            # Stage all changes
+            subprocess.run(["git", "add", "."], capture_output=True, check=True)
+            
+            # Commit
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", commit_message],
+                capture_output=True, text=True, check=True
+            )
+            
+            # Push to remote
+            push_result = subprocess.run(
+                ["git", "push"],
+                capture_output=True, text=True, check=True
+            )
+            
+            os.chdir(original_dir)
+            
+            return {
+                "success": True,
+                "commit_output": commit_result.stdout.strip(),
+                "push_output": push_result.stdout.strip()
+            }
+        except subprocess.CalledProcessError as e:
+            return {"error": f"Git command failed: {str(e)}", "stderr": e.stderr}
+        except Exception as e:
+            return {"error": f"Error: {str(e)}"}
+    
     def run_prompt_chain(self):
         """
         Sequential prompt chain: Output from one step becomes input to the next step.
@@ -807,10 +893,182 @@ Format as: Executive Summary with 3 key takeaways."""
                             break
             
             print("="*80)
-            self.agent_client.delete_agent(planner.id)
-            self.agent_client.delete_agent(executor.id)
+            # self.agent_client.delete_agent(planner.id)
+            # self.agent_client.delete_agent(executor.id)
             print("Planning completed.")
             print("="*80)
+    
+    def run_git_workflow_pattern(self):
+        """
+        Multi-Agent Git Workflow Pattern - Demonstrates Microsoft's Agentic Workflow
+        
+        This pattern showcases two specialized agents collaborating:
+        1. Scanner Agent: Detects git changes and gathers repository information
+        2. Committer Agent: Generates commit messages and pushes to remote
+        
+        Key Pattern Elements:
+        - Agent Specialization: Each agent has a specific role and tool
+        - Information Handoff: Agent 1's output becomes Agent 2's input
+        - User Approval Gate: Human-in-the-loop before executing changes
+        - Tool Calling: Agents autonomously decide when to use their tools
+        """
+        import json
+        import time
+        
+        with self.agent_client:
+            print("\n" + "="*60)
+            print("MULTI-AGENT GIT WORKFLOW")
+            print("="*60)
+            
+            # Get directory from user input
+            directory = input("\nDirectory (Enter for current): ").strip() or os.path.dirname(os.path.abspath(__file__))
+            
+            # ==================== STEP 1: Define Agent Tools ====================
+            # Each agent gets its own specialized tool to perform its task
+            # This follows the principle of separation of concerns
+            tools = {
+                "scan": {
+                    "type": "function",
+                    "function": {
+                        "name": "git_scan_status",
+                        "description": "Scan git repo for changes",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"directory": {"type": "string"}},
+                            "required": ["directory"]
+                        }
+                    }
+                },
+                "commit": {
+                    "type": "function",
+                    "function": {
+                        "name": "git_commit_and_push",
+                        "description": "Commit and push changes",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "directory": {"type": "string"},
+                                "commit_message": {"type": "string"}
+                            },
+                            "required": ["directory", "commit_message"]
+                        }
+                    }
+                }
+            }
+            
+            # ==================== AGENT 1: Scanner ====================
+            # Purpose: Detect uncommitted changes and gather repo metadata
+            # Tool: git_scan_status (read-only operation)
+            print("\n[Agent 1: Scanner] Checking for changes...")
+            scanner = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Scanner",
+                instructions="Scan git repo and report changes using git_scan_status tool.",
+                tools=[tools["scan"]]  # Only has access to scanning tool
+            )
+            
+            # Create isolated thread for Agent 1
+            thread1 = self.agent_client.threads.create()
+            self.agent_client.messages.create(thread_id=thread1.id, role=MessageRole.USER, content=f"Scan: {directory}")
+            run1 = self.agent_client.runs.create(thread_id=thread1.id, agent_id=scanner.id)
+            
+            # Tool Calling Loop: Agent decides when to call git_scan_status
+            # The agent interprets the user message and autonomously invokes the tool
+            scan_result = None
+            while run1.status in ["queued", "in_progress", "requires_action"]:
+                time.sleep(0.5)
+                run1 = self.agent_client.runs.get(thread_id=thread1.id, run_id=run1.id)
+                
+                # When status = "requires_action", agent wants to call the tool
+                if run1.status == "requires_action":
+                    for tool_call in run1.required_action.submit_tool_outputs.tool_calls:
+                        args = json.loads(tool_call.function.arguments)
+                        # Execute the Python function (agent can't execute code itself)
+                        scan_result = self.git_scan_status(**args)
+                        # Return results to agent so it can formulate a response
+                        run1 = self.agent_client.runs.submit_tool_outputs(
+                            thread_id=thread1.id, 
+                            run_id=run1.id,
+                            tool_outputs=[{"tool_call_id": tool_call.id, "output": json.dumps(scan_result)}]
+                        )
+            
+            # Early exit if no changes detected
+            if not scan_result or not scan_result.get("has_changes"):
+                print("✓ No changes to commit")
+                self.agent_client.delete_agent(scanner.id)
+                return
+            
+            # Display scan results to user
+            print(f"\n✓ Found {len(scan_result['changes'])} change(s) on branch: {scan_result['branch']}")
+            print(f"   Remote: {scan_result.get('remote_url', 'N/A')}")
+            print("\nChanged files:")
+            for change in scan_result['changes'][:10]:
+                print(f"   {change}")
+            
+            # ==================== HUMAN-IN-THE-LOOP APPROVAL ====================
+            # User approval gate before making any changes to git repository
+            # This demonstrates the importance of human oversight in agentic workflows
+            proceed = input("\n⚠️  Commit and push these changes? (y/n): ").strip().lower()
+            if proceed != 'y':
+                print("❌ Operation cancelled by user")
+                self.agent_client.delete_agent(scanner.id)
+                return
+            
+            # ==================== AGENT 2: Committer ====================
+            # Purpose: Generate semantic commit message and push changes
+            # Tool: git_commit_and_push (write operation)
+            # This agent receives the scan results from Agent 1 as context
+            print("\n[Agent 2: Committer] Creating commit...")
+            committer = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Committer",
+                instructions="Generate commit message and use git_commit_and_push tool.",
+                tools=[tools["commit"]]  # Only has access to commit/push tool
+            )
+            
+            # ==================== INFORMATION HANDOFF ====================
+            # Agent 1's output (scan_result) is passed to Agent 2 as context
+            # This demonstrates inter-agent communication in multi-agent workflows
+            thread2 = self.agent_client.threads.create()
+            self.agent_client.messages.create(
+                thread_id=thread2.id, 
+                role=MessageRole.USER,
+                content=f"Commit these changes to {directory}:\n{chr(10).join(scan_result['changes'][:5])}"
+            )
+            run2 = self.agent_client.runs.create(thread_id=thread2.id, agent_id=committer.id)
+            
+            # Tool Calling Loop: Agent 2 generates commit message and calls git_commit_and_push
+            while run2.status in ["queued", "in_progress", "requires_action"]:
+                time.sleep(0.5)
+                run2 = self.agent_client.runs.get(thread_id=thread2.id, run_id=run2.id)
+                
+                if run2.status == "requires_action":
+                    for tool_call in run2.required_action.submit_tool_outputs.tool_calls:
+                        args = json.loads(tool_call.function.arguments)
+                        # Agent 2 autonomously generates a descriptive commit message
+                        print(f"  Commit: {args['commit_message']}")
+                        # Execute the commit and push operation
+                        result = self.git_commit_and_push(**args)
+                        # Return execution result to agent
+                        run2 = self.agent_client.runs.submit_tool_outputs(
+                            thread_id=thread2.id, 
+                            run_id=run2.id,
+                            tool_outputs=[{"tool_call_id": tool_call.id, "output": json.dumps(result)}]
+                        )
+            
+            # ==================== WORKFLOW COMPLETE ====================
+            print("✅ Pushed to remote")
+            # Clean up both agents
+            # self.agent_client.delete_agent(scanner.id)
+            # self.agent_client.delete_agent(committer.id)
+            print("="*60)
+            
+            # Key Takeaways:
+            # 1. Agent Specialization: Each agent has one clear responsibility
+            # 2. Tool Access Control: Agents only have tools they need (security)
+            # 3. Information Flow: Output of Agent 1 → Input to Agent 2
+            # 4. Human Oversight: User approval before destructive operations
+            # 5. Autonomous Decision Making: Agents decide when to call tools
     
     def run_interactive_menu(self):
         """Display menu and run selected pattern"""
@@ -823,8 +1081,9 @@ Format as: Executive Summary with 3 key takeaways."""
         print("5. Reflection Pattern")
         print("6. Tool Calling Pattern")
         print("7. Planning Pattern")
+        print("8. Multi-Agent Git Workflow")
         
-        choice = input("\nWhich pattern do you want to run? (1-7): ").strip()
+        choice = input("\nWhich pattern do you want to run? (1-8): ").strip()
         
         if choice == '1':
             self.run_prompt_chain()
@@ -840,8 +1099,10 @@ Format as: Executive Summary with 3 key takeaways."""
             self.run_tool_calling_pattern()
         elif choice == '7':
             self.run_planning_pattern()
+        elif choice == '8':
+            self.run_git_workflow_pattern()
         else:
-            print("Invalid choice. Please run the script again and select 1-7.")
+            print("Invalid choice. Please run the script again and select 1-8.")
 
 
 # Main entry point
