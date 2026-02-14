@@ -898,6 +898,188 @@ Format as: Executive Summary with 3 key takeaways."""
             print("Planning completed.")
             print("="*80)
     
+    def run_memory_pattern(self):
+        """
+        Memory Pattern: Short-term (conversation) vs Long-term (persistent) memory.
+        
+        - SHORT-TERM: Thread messages (auto-managed, session only)
+        - LONG-TERM: External store (explicit save/recall, cross-session)
+        - Agent 1 (Learner): Saves facts to long-term memory
+        - Agent 2 (Advisor): Recalls facts in NEW session
+        """
+        import json
+        import time
+        
+        # Simulated long-term memory (production: Azure AI Search/Cosmos DB)
+        memory_store = {}
+        
+        def save_memory(key: str, value: str) -> dict:
+            memory_store[key] = value
+            return {"saved": key}
+        
+        def recall_memory(query: str) -> dict:
+            return {"results": memory_store}
+        
+        with self.agent_client:
+            print("\n" + "="*70)
+            print("MEMORY PATTERN")
+            print("="*70)
+            
+            # Define tools
+            tools = {
+                "save": {
+                    "type": "function",
+                    "function": {
+                        "name": "save_memory",
+                        "description": "Save to long-term memory",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "string"}
+                            },
+                            "required": ["key", "value"]
+                        }
+                    }
+                },
+                "recall": {
+                    "type": "function",
+                    "function": {
+                        "name": "recall_memory",
+                        "description": "Recall from long-term memory",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }
+                }
+            }
+            
+            # Create agents
+            learner = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Learner",
+                instructions="Save important info using save_memory tool.",
+                tools=[tools["save"]]
+            )
+            
+            advisor = self.agent_client.create_agent(
+                model=self.model_deployment,
+                name="Advisor",
+                instructions="Use recall_memory to get past info and answer questions.",
+                tools=[tools["recall"]]
+            )
+            
+            print(f"✓ Learner: {learner.id}")
+            print(f"✓ Advisor: {advisor.id}")
+            
+            # PHASE 1: Learning
+            print("\n" + "─"*70)
+            print("PHASE 1: Learning (Agent saves to LONG-TERM memory)")
+            print("─"*70)
+            
+            thread1 = self.agent_client.threads.create()
+            user_input = "My name is Alex and I prefer Python for data science"
+            print(f"\nUser: {user_input}")
+            
+            self.agent_client.messages.create(
+                thread_id=thread1.id,
+                role=MessageRole.USER,
+                content=user_input
+            )
+            
+            run = self.agent_client.runs.create(thread_id=thread1.id, agent_id=learner.id)
+            
+            while run.status in ["queued", "in_progress", "requires_action"]:
+                time.sleep(0.5)
+                run = self.agent_client.runs.get(thread_id=thread1.id, run_id=run.id)
+                
+                if run.status == "requires_action":
+                    tool_outputs = []
+                    for tool_call in run.required_action.submit_tool_outputs.tool_calls:
+                        args = json.loads(tool_call.function.arguments)
+                        if tool_call.function.name == "save_memory":
+                            result = save_memory(**args)
+                            print(f"  💾 LONG-TERM: Saved {args['key']}")
+                            tool_outputs.append({
+                                "tool_call_id": tool_call.id,
+                                "output": json.dumps(result)
+                            })
+                    
+                    run = self.agent_client.runs.submit_tool_outputs(
+                        thread_id=thread1.id,
+                        run_id=run.id,
+                        tool_outputs=tool_outputs
+                    )
+            
+            if run.status == "completed":
+                msgs = self.agent_client.messages.list(thread_id=thread1.id, order=ListSortOrder.DESCENDING, limit=1)
+                for msg in msgs:
+                    if msg.role == MessageRole.AGENT and msg.text_messages:
+                        print(f"  Learner: {msg.text_messages[0].text.value}")
+            
+            print(f"\n📝 SHORT-TERM: 1 turn in thread (lost when thread ends)")
+            print(f"💾 LONG-TERM: {len(memory_store)} items stored (persists)")
+            
+            # PHASE 2: New Session - Advisor
+            print("\n" + "─"*70)
+            print("PHASE 2: NEW SESSION (Advisor recalls LONG-TERM memory)")
+            print("─"*70)
+            
+            thread2 = self.agent_client.threads.create()  # NEW thread = empty short-term
+            query = "What language does the user prefer?"
+            print(f"\nUser: {query}")
+            
+            self.agent_client.messages.create(
+                thread_id=thread2.id,
+                role=MessageRole.USER,
+                content=query
+            )
+            
+            run = self.agent_client.runs.create(thread_id=thread2.id, agent_id=advisor.id)
+            
+            while run.status in ["queued", "in_progress", "requires_action"]:
+                time.sleep(0.5)
+                run = self.agent_client.runs.get(thread_id=thread2.id, run_id=run.id)
+                
+                if run.status == "requires_action":
+                    tool_outputs = []
+                    for tool_call in run.required_action.submit_tool_outputs.tool_calls:
+                        args = json.loads(tool_call.function.arguments)
+                        if tool_call.function.name == "recall_memory":
+                            result = recall_memory(**args)
+                            print(f"  🔍 LONG-TERM: Retrieved {len(result['results'])} items")
+                            tool_outputs.append({
+                                "tool_call_id": tool_call.id,
+                                "output": json.dumps(result)
+                            })
+                    
+                    run = self.agent_client.runs.submit_tool_outputs(
+                        thread_id=thread2.id,
+                        run_id=run.id,
+                        tool_outputs=tool_outputs
+                    )
+            
+            if run.status == "completed":
+                msgs = self.agent_client.messages.list(thread_id=thread2.id, order=ListSortOrder.DESCENDING, limit=1)
+                for msg in msgs:
+                    if msg.role == MessageRole.AGENT and msg.text_messages:
+                        print(f"  Advisor: {msg.text_messages[0].text.value}\n")
+            
+            # Summary
+            print("="*70)
+            print("KEY CONCEPTS")
+            print("="*70)
+            print("\n📝 SHORT-TERM (Thread): Auto-managed, lost after session")
+            print("💾 LONG-TERM (External): Explicit save/recall, persists forever")
+            print(f"\nMemory store: {memory_store}")
+            print("\n💡 Production: Use Azure AI Search or Cosmos DB")
+            print("="*70)
+            
+            # self.agent_client.delete_agent(learner.id)
+            # self.agent_client.delete_agent(advisor.id)
+    
     def run_git_workflow_pattern(self):
         """
         Multi-Agent Git Workflow Pattern - Demonstrates Microsoft's Agentic Workflow
@@ -1082,8 +1264,9 @@ Format as: Executive Summary with 3 key takeaways."""
         print("6. Tool Calling Pattern")
         print("7. Planning Pattern")
         print("8. Multi-Agent Git Workflow")
+        print("9. Memory Pattern (Short-term vs Long-term)")
         
-        choice = input("\nWhich pattern do you want to run? (1-8): ").strip()
+        choice = input("\nWhich pattern do you want to run? (1-9): ").strip()
         
         if choice == '1':
             self.run_prompt_chain()
@@ -1101,8 +1284,10 @@ Format as: Executive Summary with 3 key takeaways."""
             self.run_planning_pattern()
         elif choice == '8':
             self.run_git_workflow_pattern()
+        elif choice == '9':
+            self.run_memory_pattern()
         else:
-            print("Invalid choice. Please run the script again and select 1-8.")
+            print("Invalid choice. Please run the script again and select 1-9.")
 
 
 # Main entry point
